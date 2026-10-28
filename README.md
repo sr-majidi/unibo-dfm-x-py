@@ -33,9 +33,9 @@ See [Requirements](#requirements) for the list of required packages. The scripts
 | 2 | Estimate the number of common factors | [`ABC_crit`](#abc_crit) | `rhat1` and `rhat2`, the number of factors at the 5% and 1% thresholds |
 | 3 | Static factor analysis | [`SFM_StateSpace`](#class-sfm_statespace) / [`StaticFM`](#staticfm) | factors, loadings, projection, residuals, eigenvalues and eigenvectors |
 | 4 | VAR lag selection | [`select_var_order`](#select_var_order) | the order of the VAR process of the factors, chosen by AIC and confirmed via the likelihood ratio test |
-| 5 | State space estimation | [`DynamicFM`](#dynamicfm), which calls [`DFM_init_params`](#dfm_init_params) and `DynamicFactorMQ` | a [`DynamicFMResults`](#class-dynamicfmresults) instance holding the fitted model |
-| 6 | Rolling-window forecasting | `results.forecast(...)` on every window, rescaled via `mu` and `sigma` | 1-step and 4-step ahead forecasts and the relative RMSFE per series |
-| 7 | Spectral analysis and unit root diagnostics (optional) | [`DFM_periodogram`](#dfm_periodogram), [`adf_wrapper`](#unit-root-diagnostics), [`kpss_wrapper`](#unit-root-diagnostics), [`CT_unitroot`](#unit-root-diagnostics) | periodograms, ADF/KPSS test results and the wild bootstrap ADF p-value |
+| 5 | State space estimation | [`DFM_StateSpace`](#dfm_statespace), which calls [`DFM_init_params`](#dfm_init_params) and `DynamicFactorMQ` | a [`DFM_StateSpace_Results`](#class-dfm_statespace_results) instance holding the fitted model |
+| 6 | Rolling-window forecasting | `results.forecast(...)` on every window, rescaled via `mu` and `sigma` | 1-step and 4-step ahead forecasts for every forecast origin, the mean squared forecast errors of the select variables in a pandas dataframe, and plots of the forecasts against the real observations |
+| 7 | Spectral analysis and unit root diagnostics (optional) | [`DFM_periodogram`](#dfm_periodogram) on the estimated factors, [`adf_wrapper`](#unit-root-diagnostics), [`kpss_wrapper`](#unit-root-diagnostics), [`CT_unitroot`](#unit-root-diagnostics) | periodograms of the factors, ADF/KPSS test results and the wild bootstrap ADF p-value |
 
 ## Usage Example
 ```python
@@ -44,7 +44,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from src.modules.Fred_transform import Fred_transform
 from src.modules.ABC_crit import ABC_crit
-from src.models.dynamic_methods import DynamicFM, select_var_order
+from src.models.dynamic_methods import DFM_StateSpace, select_var_order
 from src.models.static_methods import SFM_StateSpace
 
 ## Load the raw FRED-QD data and apply the stationarity transformations
@@ -80,12 +80,12 @@ plt.show()
 state_lag = select_var_order(sfm.factors, maxlags=4, alpha=0.05)
 
 ## Estimate the dynamic factor model, initialized with the static estimates
-dfm = DynamicFM(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
+dfm = DFM_StateSpace(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
 dfm_res = dfm.results
 print(dfm_res.summary())
 ```
 > [!NOTE]
-> 1. The data is standardized by `DynamicFM` before the model is estimated, therefore the forecasts are on the standardized scale and have to be brought back to the original scale via the moments stored in the output.
+> 1. The data is standardized by `DFM_StateSpace` before the model is estimated, therefore the forecasts are on the standardized scale and have to be brought back to the original scale via the moments stored in the output.
 >
 > 2. The upper bound for the order of the VAR process is set to 4, which is one year of quarterly lags. With a larger bound the AIC tends to select the largest order available, and the EM algorithm can fail on some of the estimation windows.
 
@@ -94,9 +94,49 @@ print(dfm_res.summary())
 fc = dfm_res.forecast(steps=4)
 fc = fc * dfm.sigma + dfm.mu
 
-## The smoothed factors can be accessed via
+## The factors estimated via the Kalman smoother can be accessed via
 factors_smoothed = dfm_res.factors.smoothed
+
+## Spectrum of the estimated common factors, one panel per factor
+from src.modules.DFM_periodogram import DFM_periodogram
+
+fig, ax = plt.subplots(nrows=kfactors, sharex=True, figsize=(16, 4*kfactors)) ## The figure is made taller to fit the labels of the stacked plots
+for k in range(kfactors):
+    DFM_periodogram(sfm.factors.iloc[:,k], freq='QD', ax=ax[k])
+plt.show()
 ```
+
+The rolling-window forecasts are obtained by re-estimating the model on the most recent `W` observations at each forecast origin. Continuing the example, with `fred_df_full` denoting the cleaned dataframe before it is truncated to the first window:
+```python
+W = 80 ## Window size, 20 years of quarterly data
+horizons = [1, 4]
+H = max(horizons)
+series_names = ['GDPC1', 'PCECC96', 'UNRATE', 'DPIC96', 'INDPRO', 'HOUST', 'TB3MS'] ## Select variables
+
+fc_dfm = {h: [] for h in horizons}
+fc_index = {h: [] for h in horizons}
+
+for origin in range(W, fred_df_full.shape[0] - H + 1):
+    window = fred_df_full.iloc[origin-W:origin,:]
+    window.index.freq = window.index.inferred_freq
+    dfm_w = DFM_StateSpace(window, nfactors=kfactors, factor_orders=state_lag, maxiter=50)
+    fc = dfm_w.results.forecast(steps=H) * dfm_w.sigma + dfm_w.mu
+    for h in horizons:
+        fc_dfm[h].append(fc.iloc[h-1,:].to_numpy())
+        fc_index[h].append(fred_df_full.index[origin+h-1])
+
+## Forecasts of each horizon indexed by the date of the target observation
+fc_df = {h: pd.DataFrame(np.array(fc_dfm[h]), index=fc_index[h], columns=fred_df_full.columns) for h in horizons}
+
+## Mean squared forecast errors of the select variables, one column per forecast horizon
+msfe = pd.DataFrame({f'h = {h}': ((fred_df_full.loc[fc_df[h].index, series_names] - fc_df[h][series_names])**2).mean()
+                     for h in horizons})
+print(msfe)
+```
+> [!NOTE]
+> 1. The EM algorithm is capped at 50 iterations (`maxiter=50`) when the model is re-estimated at each forecast origin, as a full run of 500 iterations on every window is prohibitively slow.
+>
+> 2. The COVID quarters are set to NaN in the observations and are skipped in the averages of the squared forecast errors. They show up as gaps in the plots of the actual series. The mean squared forecast errors are on the scale of the transformed data and are therefore not comparable across variables.
 
 ## Models
 
@@ -187,17 +227,17 @@ Parameters:
 > [!NOTE]
 > `statsmodels` orders the loadings variable by variable, therefore the matrix of loadings has to be flattened as `loadings.ravel()` and not as `loadings.T.ravel()`.
 
-### `DynamicFM`
+### `DFM_StateSpace`
 ```python
-DynamicFM(data: pd.DataFrame,
-          nfactors: int,
-          factor_orders: int | None = None,
-          idiosyncratic_ar1: bool | None = False,
-          maxlags: int | None = 8,
-          missing: str | None = 'fill-em',
-          maxiter: int | None = 500,
-          tolerance: float | None = 1e-6,
-          **kwargs) -> DynamicFMResults
+DFM_StateSpace(data: pd.DataFrame,
+               nfactors: int,
+               factor_orders: int | None = None,
+               idiosyncratic_ar1: bool | None = False,
+               maxlags: int | None = 8,
+               missing: str | None = 'fill-em',
+               maxiter: int | None = 500,
+               tolerance: float | None = 1e-6,
+               **kwargs) -> DFM_StateSpace_Results
 ```
 Wrapper function around the `DynamicFactorMQ` class of `statsmodels`. It standardizes the data, estimates the factors and the loadings via PCA, selects and estimates the VAR process of the factors, estimates the variances of the idiosyncratic components, and finally fits the model via the EM algorithm starting from the static estimates.
 
@@ -213,13 +253,13 @@ Parameters:
 - `**kwargs`: Passed on to the constructor of `DynamicFactorMQ`.
 
 Returns:
-- `DynamicFMResults` containing the fitted results, the starting parameters, the VAR order and the moments used to standardize the data.
+- `DFM_StateSpace_Results` containing the fitted results, the starting parameters, the VAR order and the moments used to standardize the data.
 
 > [!NOTE]
 > The rows of the data with fewer than `nfactors` observations, e.g. the COVID quarters set to NaN, are left out of the static initialization only. The Kalman filter of `DynamicFactorMQ` uses all the rows.
 
-### `class DynamicFMResults`
-Results container for the output of `DynamicFM`.
+### `class DFM_StateSpace_Results`
+Results container for the output of `DFM_StateSpace`.
 #### Properties
 - `results`: Fitted `DynamicFactorMQResults` instance from `statsmodels`. It is fitted on the standardized data.
 - `start_params`: Initial parameters fed to the EM algorithm.
