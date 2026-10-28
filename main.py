@@ -234,8 +234,6 @@ plt.show()
 """
 4.1 Spectral Analysis
     Periodograms of the estimated common factors via DFM_periodogram.
-    The factors should concentrate the power of the data at business cycle frequencies, namely cycles of 8 to 32 quarters
-    which correspond to the frequencies 0.125 to 0.5 (in cycles per year) on the scale of the plots below.
 
 """
 
