@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
 from dataclasses import dataclass
-from scipy.stats import chi2
 from statsmodels.tools.validation import (string_like,
                                           array_like,
                                           bool_like,
@@ -19,9 +18,9 @@ plt.rc('lines', linewidth=1.5)
 sns.set_style('darkgrid')
 
 @dataclass
-class DFM_StateSpace_Results:
+class DynamicFMResults:
     """
-    Container for the output of DFM_StateSpace.
+    Container for the output of DynamicFM.
 
     Attributes
     ----------
@@ -42,52 +41,6 @@ class DFM_StateSpace_Results:
     var_order: int
     mu: pd.Series
     sigma: pd.Series
-
-def select_var_order(factors: pd.DataFrame, maxlags: int | None = 8,
-                     alpha: float | None = 0.05) -> int:
-    """
-    Select the order of the VAR process followed by the common factors.
-
-    The order is first chosen via AIC. It is then compared against the next most
-    parsimonious process (the AIC selected order minus one) via the likelihood ratio test.
-    The larger process is kept only if the null of the smaller one is rejected at level alpha.
-
-    Parameters
-    ----------
-    factors : pd.DataFrame
-        Estimated common factors, one column per factor.
-    maxlags : int | None, optional
-        Upper bound for the order of the process. The default is 8.
-    alpha : float | None, optional
-        Significance level of the likelihood ratio test. The default is 0.05.
-
-    Returns
-    -------
-    int
-        Selected VAR order. Always at least 1, as required by DynamicFactorMQ.
-
-    """
-    if type(factors) != pd.core.frame.DataFrame:
-        raise ValueError(f'The factors must be a pandas DataFrame. Got {type(factors)}.')
-    maxlags = int_like(maxlags, 'maxlags')
-    alpha = float_like(alpha, 'alpha')
-
-    freq = getattr(factors.index, 'freq', None)
-    state_var = sm.tsa.VAR(factors, freq=freq)
-    lag_aic = state_var.select_order(maxlags=maxlags, trend='n').aic
-
-    ## A VAR(1) cannot be reduced any further. A VAR(0) is not admissible for the state equation
-    if lag_aic <= 1:
-        return 1
-
-    ## The smaller model is fit on one less observation so that both are estimated on the same sample
-    fit1 = sm.tsa.VAR(factors, freq=freq).fit(maxlags=lag_aic, ic=None, trend='n')
-    fit2 = sm.tsa.VAR(factors.iloc[1:,:], freq=freq).fit(maxlags=lag_aic-1, ic=None, trend='n')
-    lr_stat = -2 * (fit2.llf - fit1.llf)
-    chi_df = factors.shape[1] ** 2
-    lr_pval = chi2.sf(lr_stat, chi_df)
-
-    return int(lag_aic) if lr_pval < alpha else int(lag_aic) - 1
 
 def DFM_init_params(loadings: pd.DataFrame, var_params: pd.DataFrame,
                     resid_var: pd.Series, idio_ar1: pd.Series | None = None) -> np.ndarray:
@@ -144,10 +97,10 @@ def DFM_init_params(loadings: pd.DataFrame, var_params: pd.DataFrame,
 
     return init_params
 
-def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None = None,
-                   idiosyncratic_ar1: bool | None = False, maxlags: int | None = 8,
-                   missing: str | None = 'fill-em', maxiter: int | None = 500,
-                   tolerance: float | None = 1e-6, **kwargs) -> DFM_StateSpace_Results:
+def DynamicFM(data: pd.DataFrame, nfactors: int, factor_orders: int,
+              idiosyncratic_ar1: bool | None = False,
+              missing: str | None = 'fill-em', maxiter: int | None = 500,
+              tolerance: float | None = 1e-6, **kwargs) -> DynamicFMResults:
     """
     Estimate a dynamic factor model via the EM algorithm of statsmodels' DynamicFactorMQ,
     initialized with the static PCA estimates.
@@ -155,7 +108,7 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
     The pipeline is:
         1. Standardize the data.
         2. Estimate the factors and the loadings via PCA (SFM_StateSpace).
-        3. Select the order of the VAR process of the factors (select_var_order) and estimate it.
+        3. Estimate the VAR process of the factors of the given order.
         4. Estimate the variances (and AR(1) coefficients) of the idiosyncratic components.
         5. Fit DynamicFactorMQ starting from the above estimates (DFM_init_params).
 
@@ -169,13 +122,10 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
         they are only imputed for the initialization and are handled natively by the Kalman filter.
     nfactors : int
         Number of common factors, e.g. as estimated via ABC_crit.
-    factor_orders : int | None, optional
-        Order of the VAR process of the factors. If None it is selected via select_var_order.
-        The default is None.
+    factor_orders : int
+        Order of the VAR process of the factors.
     idiosyncratic_ar1 : bool | None, optional
         Whether the idiosyncratic components follow an AR(1) process. The default is False.
-    maxlags : int | None, optional
-        Upper bound for the order selection. The default is 8.
     missing : str | None, optional
         Imputation method for the initialization, 'mean' or 'fill-em'. The default is 'fill-em'.
     maxiter : int | None, optional
@@ -187,7 +137,7 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
 
     Returns
     -------
-    DFM_StateSpace_Results
+    DynamicFMResults
         Dataclass containing the fitted results, the starting parameters, the VAR order
         and the moments used to standardize the data.
 
@@ -200,7 +150,7 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
     if type(data) != pd.core.frame.DataFrame:
         raise ValueError(f'The data must be a pandas DataFrame. Got {type(data)}.')
     nfactors = int_like(nfactors, 'nfactors')
-    factor_orders = int_like(factor_orders, 'factor_orders', optional=True)
+    factor_orders = int_like(factor_orders, 'factor_orders')
     idiosyncratic_ar1 = bool_like(idiosyncratic_ar1, 'idiosyncratic_ar1')
     missing = string_like(missing, 'missing')
     maxiter = int_like(maxiter, 'maxiter')
@@ -224,8 +174,6 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
     factors, loadings = sfm.factors, sfm.loadings
 
     ## VAR process of the factors
-    if factor_orders is None:
-        factor_orders = select_var_order(factors, maxlags=maxlags)
     var_res = sm.tsa.VAR(factors, freq=getattr(factors.index, 'freq', None)).fit(maxlags=factor_orders, ic=None, trend='n')
 
     ## Idiosyncratic components. Only the residuals at the observed entries are used
@@ -243,5 +191,5 @@ def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None 
     dfm_res = dfm_model.fit(start_params=init_params, transformed=True, cov_type='none',
                             method='em', maxiter=maxiter, tolerance=tolerance)
 
-    return DFM_StateSpace_Results(results=dfm_res, start_params=init_params, var_order=factor_orders,
+    return DynamicFMResults(results=dfm_res, start_params=init_params, var_order=factor_orders,
                             mu=mu, sigma=sigma)
