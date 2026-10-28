@@ -310,7 +310,9 @@ prefer to feed the initial parameters myself.
 
 """
 
-init_params = np.append(init_params, Lambda_hat.T.ravel())
+## statsmodels orders the loadings variable by variable (loading.0.1->x1, loading.0.2->x1, ...), hence the row-major ravel of Lambda_hat
+#init_params = np.append(init_params, Lambda_hat.T.ravel())
+init_params = np.append(init_params, Lambda_hat.ravel())
 init_params = np.append(init_params, state_var_res.params.to_numpy().T.ravel())
 init_params = np.append(init_params, np.identity(kfactors)[np.tril_indices(kfactors,0)])
 init_params = np.append(init_params, resid_var.to_numpy())
