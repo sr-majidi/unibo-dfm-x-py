@@ -80,7 +80,7 @@ These are the series that do not pass the Dickey Fuller test with constant regre
 Each series has to be individually analyzed via other tests such as kpss, acf, Taylor-Cavaliere, ecc.
 '''
 
-## 1. Non stationarity of USEHS is obviously due to structural break in the late 90s.
+## 1. Non stationarity of USEHS is obviously due to a structural break in the late 90s.
 ## 2. USSERV seems to have a unit root.
 ## 3. CES9092000001 seems to have a unit root.
 ## 4. CIVPART is not a unit root process but it isn't stationary either as it does not pass the kpss test under any circumstances.
@@ -124,8 +124,12 @@ fred_df = fred_df.drop(columns=['NWPIx','USEHS'])
 
 ## Need to handle COVID period. Typically 2020Q2 and 2020Q3 are set to NaN and later imputed with the Kalman smoother.
 fred_df.loc['2020-06-01':'2020-09-01',:] = None
+
+## Make a copy of the full dataset and then truncate it to include only the first 80 observations for 
+## the pre-estimation analysis. This window size corresponds to 20 years of quarterly data which is standard practice in the literature.
+W = 80
 fred_df_full = fred_df.copy(deep=True)
-fred_df = fred_df.iloc[:80]
+fred_df = fred_df.iloc[:W]
 
 """
 2. Factor Analysis via Static Methods
@@ -151,7 +155,7 @@ plt.show()
 kfactors = rhat1
 
 from src.models.static_methods import SFM_StateSpace
-from src.models.dynamic_methods import DynamicFM, select_var_order
+from src.models.dynamic_methods import DFM_StateSpace, select_var_order
 
 """
 2. Factor Analysis via Static Methods
@@ -192,18 +196,9 @@ state_lag = select_var_order(F_hat, maxlags=4, alpha=0.05)
 
 """
 
-## The window size is set to 80 quarters, equivalent to 20 years which is standard practice in the literature
-W = 80
-## Forecast horizons
-horizons = [1, 4]
-H = max(horizons)
-## Cap on the number of EM iterations when the model is re-estimated at each forecast origin. Starting from the PCA estimates,
-## a full run of 500 iterations on every window is prohibitively slow
-maxiter_roll = 50
-
-## Full sample estimate on the first window, the starting parameters are the PCA estimates obtained above
-## (DynamicFM repeats the static initialization internally on the window it is given)
-dfm = DynamicFM(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
+## Estimate on the first window, the starting parameters are the PCA estimates obtained above
+## (DFM_StateSpace repeats the static initialization internally on the window it is given)
+dfm = DFM_StateSpace(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
 dfm_res = dfm.results
 print(dfm_res.summary())
 
@@ -211,19 +206,19 @@ print(dfm_res.summary())
 4. Post-Estimation Analysis and Diagnostic Tests
 """
 
-## The smoothed factors are on the same scale as the PCA factors, compare the two
-fig, ax = plt.subplots(nrows=kfactors, sharex=True)
+## Compare the principle components with the smoothed states from the Kalman Smoother
+fig, ax = plt.subplots(nrows=kfactors, sharex=True, figsize=(16, 3*kfactors))
 ax = np.atleast_1d(ax)
 for k in range(kfactors):
     ax[k].plot(F_hat.index, F_hat.iloc[:,k], label='PCA')
-    ax[k].plot(F_hat.index, dfm_res.factors.smoothed.iloc[:,k].to_numpy(), label='DFM (smoothed)')
+    ax[k].plot(F_hat.index, dfm_res.factors.smoothed.iloc[:,k].to_numpy(), label='Kalman Smoother')
     ax[k].set_ylabel(f'Factor {k+1}')
     ax[k].legend()
 plt.show()
 
 """
 4.1 Spectral Analysis
-    Periodograms of a few key macroeconomic series and of the estimated common factors, via DFM_periodogram.
+    Periodograms of the estimated common factors via DFM_periodogram.
     The factors should concentrate the power of the data at business cycle frequencies, namely cycles of 8 to 32 quarters
     which correspond to the frequencies 0.125 to 0.5 (in cycles per year) on the scale of the plots below.
 
@@ -231,20 +226,11 @@ plt.show()
 
 from src.modules.DFM_periodogram import DFM_periodogram
 
-## Series of interest. Only the ones that survived the cleaning of the data are used
-series_names = [c for c in ['GDPC1', 'INDPRO', 'PAYEMS', 'UNRATE', 'CPIAUCSL'] if c in fred_df.columns]
+## Select variables for producing and comparing forecasts
+series_names = [c for c in ['GDPC1', 'PCECC96', 'UNRATE', 'DPIC96', 'INDPRO', 'HOUST', 'TB3MS'] if c in fred_df.columns]
 
-fig, ax = plt.subplots(nrows=len(series_names), sharex=True)
-ax = np.atleast_1d(ax)
-for i, name in enumerate(series_names):
-    DFM_periodogram(fred_df[name], freq='QD', ax=ax[i])
-    ## Only the last panel keeps the label of the x axis
-    if i < len(series_names) - 1:
-        ax[i].set_xlabel('')
-plt.show()
-
-## Spectrum of the estimated common factors, the factors are NaN free by construction
-fig, ax = plt.subplots(nrows=kfactors, sharex=True)
+## Spectrum of the estimated common factors estimated by the periodogram
+fig, ax = plt.subplots(nrows=kfactors, sharex=True, figsize=(16, 4*kfactors))
 ax = np.atleast_1d(ax)
 for k in range(kfactors):
     DFM_periodogram(F_hat.iloc[:,k], freq='QD', ax=ax[k])
@@ -252,56 +238,67 @@ for k in range(kfactors):
         ax[k].set_xlabel('')
 plt.show()
 
-## The periodogram can also be compared across kernels and scalings, e.g. the power spectral density of GDPC1 with a Hann window
-fig, ax = plt.subplots()
-pgram = DFM_periodogram(fred_df[series_names[0]], freq='QD', ax=ax, window='hann', scaling='density')
-plt.show()
-print(f'Dominant frequency of {series_names[0]}: {pgram.fxx[np.argmax(pgram.Pxx[1:]) + 1]:.3f} cycles per year')
-
 """
 5. Forecasting via The Common Component
     Rolling window of fixed size W. At each origin the model is re-estimated, and the forecasts, which are
     produced on the standardized scale, are brought back to the original scale via the moments of the window.
-    The benchmark is the sample mean of the window, since the series are stationary after the FRED transformations.
 
 """
+## Forecast horizons
+horizons = [1, 4]
+H = max(horizons)
 
 T_full = fred_df_full.shape[0]
 origins = range(W, T_full - H + 1)
 
 fc_dfm = {h: [] for h in horizons}
-fc_bench = {h: [] for h in horizons}
 actual = {h: [] for h in horizons}
 fc_index = {h: [] for h in horizons}
+
+## Cap on the number of EM iterations when the model is re-estimated at each forecast origin. Starting from the PCA estimates,
+## a full run of 500 iterations on every window is prohibitively slow
+maxiter_roll = 50
 
 for origin in origins:
     window = fred_df_full.iloc[origin-W:origin,:]
     window.index.freq = window.index.inferred_freq
-    dfm_w = DynamicFM(window, nfactors=kfactors, factor_orders=state_lag, maxiter=maxiter_roll)
+    dfm_w = DFM_StateSpace(window, nfactors=kfactors, factor_orders=state_lag, maxiter=maxiter_roll)
     fc = dfm_w.results.forecast(steps=H)
     fc = fc * dfm_w.sigma + dfm_w.mu
     for h in horizons:
         fc_dfm[h].append(fc.iloc[h-1,:].to_numpy())
-        fc_bench[h].append(window.mean().to_numpy())
         actual[h].append(fred_df_full.iloc[origin+h-1,:].to_numpy())
         fc_index[h].append(fred_df_full.index[origin+h-1])
 
-## Forecast losses. The COVID quarters are missing and are therefore skipped in the averages
-rmsfe = dict()
-for h in horizons:
-    cols = fred_df_full.columns
-    e_dfm = pd.DataFrame(np.array(actual[h]) - np.array(fc_dfm[h]), index=fc_index[h], columns=cols)
-    e_bench = pd.DataFrame(np.array(actual[h]) - np.array(fc_bench[h]), index=fc_index[h], columns=cols)
-    rmsfe[h] = pd.DataFrame({'DFM': np.sqrt((e_dfm**2).mean()),
-                             'Benchmark': np.sqrt((e_bench**2).mean())})
-    rmsfe[h]['Relative'] = rmsfe[h]['DFM']/rmsfe[h]['Benchmark']
-    print(f'\nh = {h}: share of series where the DFM beats the benchmark: {(rmsfe[h]["Relative"] < 1).mean():.2%}')
-    print(f'h = {h}: median relative RMSFE: {rmsfe[h]["Relative"].median():.3f}')
+## Collect the forecasts of each horizon in a dataframe indexed by the date of the target observation
+fc_df = {h: pd.DataFrame(np.array(fc_dfm[h]), index=fc_index[h], columns=fred_df_full.columns) for h in horizons}
 
-## Distribution of the relative RMSFE across series
-fig, ax = plt.subplots(ncols=len(horizons))
-for i, h in enumerate(horizons):
-    sns.histplot(rmsfe[h]['Relative'], ax=ax[i])
-    ax[i].axvline(1.0, color='k', linestyle='--')
-    ax[i].set_title(f'Relative RMSFE (DFM / Benchmark), h = {h}')
-plt.show()
+## Mean squared forecast errors of the select variables, one column per forecast horizon
+## The errors are on the scale of the transformed data. The COVID quarters are missing in the observations and are therefore skipped in the averages
+msfe = pd.DataFrame({f'h = {h}': ((fred_df_full.loc[fc_df[h].index, series_names] - fc_df[h][series_names])**2).mean()
+                     for h in horizons})
+msfe.index.name = 'MSFE'
+print(msfe)
+
+## Visualize the forecasts against the real observations for the select variables
+for h in horizons:
+    fig, ax = plt.subplots(nrows=len(series_names), sharex=True, figsize=(16, 3*len(series_names)))
+    ax = np.atleast_1d(ax)
+    for i, name in enumerate(series_names):
+        ax[i].plot(fred_df_full[name].loc[fc_df[h].index], color='k', label='Actual')
+        ax[i].plot(fc_df[h][name], color='C3', label=f'DFM, h = {h}')
+        ax[i].set_ylabel(name)
+        ax[i].legend(loc='upper left')
+    ax[0].set_title(f'{h}-step ahead forecasts against the real observations')
+    plt.show()
+
+
+
+
+
+
+
+
+
+
+
