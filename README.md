@@ -17,7 +17,7 @@ This repository develops a framework in Python for estimating dynamic factor mod
 
 ## Installation
 ```bash
-git clone https://github.com/donn-majidi/unibo-dfm-x-py.git
+git clone https://github.com/sr-majidi/unibo-dfm-x-py.git
 cd unibo-dfm-x-py
 python -m venv .venv
 source .venv/bin/activate  # on Windows: .venv\Scripts\activate
