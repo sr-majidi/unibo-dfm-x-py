@@ -155,7 +155,7 @@ plt.show()
 kfactors = rhat1
 
 from src.models.static_methods import SFM_StateSpace
-from src.models.dynamic_methods import DFM_StateSpace, select_var_order
+from src.models.dynamic_methods import DynamicFM
 
 """
 2. Factor Analysis via Static Methods
@@ -182,10 +182,25 @@ resid = sfm.standardized_residuals
 ## estimated variance of the residuals, this will be later fed into the EM algorithm in the initialization step
 resid_var = resid.std()**2
 
-## Specify a VAR process for the estimated factors and select its order via AIC confirmed by the likelihood ratio test
+## Specify a VAR process for the estiamted factors and use AIC to select the lag order of the process
 ## The upper bound is set to one year of quarterly lags. With maxlags=8, AIC always picks 8, and a VAR(8) for 5 factors on a window of 80 observations
 ## makes the EM algorithm fail on some of the windows (non positive definite covariance of the factor innovations)
-state_lag = select_var_order(F_hat, maxlags=4, alpha=0.05)
+state_var = sm.tsa.VAR(F_hat, freq=F_hat.index.freq)
+state_lag_res = state_var.select_order(maxlags=4, trend='n')
+lag_aic = state_lag_res.aic
+
+## We now compare the AIC selected process with the next most parsimonious process (whose order is simply given by the AIC selected lag order minus one) via the likelihood ratio test
+if lag_aic <= 1:
+    state_lag = lag_aic
+else:
+    fit1 = sm.tsa.VAR(F_hat, freq=F_hat.index.freq).fit(maxlags=lag_aic, ic=None, trend='n')
+    fit2 = sm.tsa.VAR(F_hat.iloc[1:,:], freq=F_hat.index.freq).fit(maxlags=lag_aic-1, ic=None, trend='n')
+    lr_stat = -2 * (fit2.llf - fit1.llf)
+    chi_df = F_hat.shape[1] ** 2
+
+    lr_pval = chi2.sf(lr_stat, chi_df)
+
+    state_lag = lag_aic if lr_pval < 0.05 else lag_aic - 1
 
 """
 3. State Space Representation and Estimation of the DFM
@@ -197,8 +212,8 @@ state_lag = select_var_order(F_hat, maxlags=4, alpha=0.05)
 """
 
 ## Estimate on the first window, the starting parameters are the PCA estimates obtained above
-## (DFM_StateSpace repeats the static initialization internally on the window it is given)
-dfm = DFM_StateSpace(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
+## (DynamicFM repeats the static initialization internally on the window it is given)
+dfm = DynamicFM(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
 dfm_res = dfm.results
 print(dfm_res.summary())
 
@@ -262,7 +277,7 @@ maxiter_roll = 50
 for origin in origins:
     window = fred_df_full.iloc[origin-W:origin,:]
     window.index.freq = window.index.inferred_freq
-    dfm_w = DFM_StateSpace(window, nfactors=kfactors, factor_orders=state_lag, maxiter=maxiter_roll)
+    dfm_w = DynamicFM(window, nfactors=kfactors, factor_orders=state_lag, maxiter=maxiter_roll)
     fc = dfm_w.results.forecast(steps=H)
     fc = fc * dfm_w.sigma + dfm_w.mu
     for h in horizons:
