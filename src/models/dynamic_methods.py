@@ -19,9 +19,9 @@ plt.rc('lines', linewidth=1.5)
 sns.set_style('darkgrid')
 
 @dataclass
-class DynamicFMResults:
+class DFM_StateSpace_Results:
     """
-    Container for the output of DynamicFM.
+    Container for the output of DFM_StateSpace.
 
     Attributes
     ----------
@@ -93,6 +93,8 @@ def DFM_init_params(loadings: pd.DataFrame, var_params: pd.DataFrame,
                     resid_var: pd.Series, idio_ar1: pd.Series | None = None) -> np.ndarray:
     """
     Assemble the vector of starting parameters for DynamicFactorMQ out of the static estimates.
+    Even though statsmodels by default uses PCA to initialize the EM algorithm, I still
+    prefer to feed the initial parameters myself.
 
     Parameters
     ----------
@@ -121,9 +123,9 @@ def DFM_init_params(loadings: pd.DataFrame, var_params: pd.DataFrame,
     nfactors = loadings.shape[1]
 
     '''
-    The parameters are passed in the following order, all matrices being vectorized:
+    The parameters are passed in the following order, all vectorized:
 
-        1. Matrix of loadings, variable by variable (row-major in Lambda, so NOT Lambda.T.ravel())
+        1. Matrix of loadings, variable by variable, vectorized with loadings.ravel()
         2. Transition matrices of the VAR process, equation by equation with the lags side by side [A_1 A_2 ... A_p]
            Since statsmodels stacks the lags vertically as [A_1.T; A_2.T; ...; A_p.T], this is just params.T.ravel()
         3. Lower triangular entries of the Cholesky factor of the covariance of the factor innovations
@@ -142,10 +144,10 @@ def DFM_init_params(loadings: pd.DataFrame, var_params: pd.DataFrame,
 
     return init_params
 
-def DynamicFM(data: pd.DataFrame, nfactors: int, factor_orders: int | None = None,
-              idiosyncratic_ar1: bool | None = False, maxlags: int | None = 8,
-              missing: str | None = 'fill-em', maxiter: int | None = 500,
-              tolerance: float | None = 1e-6, **kwargs) -> DynamicFMResults:
+def DFM_StateSpace(data: pd.DataFrame, nfactors: int, factor_orders: int | None = None,
+                   idiosyncratic_ar1: bool | None = False, maxlags: int | None = 8,
+                   missing: str | None = 'fill-em', maxiter: int | None = 500,
+                   tolerance: float | None = 1e-6, **kwargs) -> DFM_StateSpace_Results:
     """
     Estimate a dynamic factor model via the EM algorithm of statsmodels' DynamicFactorMQ,
     initialized with the static PCA estimates.
@@ -185,7 +187,7 @@ def DynamicFM(data: pd.DataFrame, nfactors: int, factor_orders: int | None = Non
 
     Returns
     -------
-    DynamicFMResults
+    DFM_StateSpace_Results
         Dataclass containing the fitted results, the starting parameters, the VAR order
         and the moments used to standardize the data.
 
@@ -241,5 +243,5 @@ def DynamicFM(data: pd.DataFrame, nfactors: int, factor_orders: int | None = Non
     dfm_res = dfm_model.fit(start_params=init_params, transformed=True, cov_type='none',
                             method='em', maxiter=maxiter, tolerance=tolerance)
 
-    return DynamicFMResults(results=dfm_res, start_params=init_params, var_order=factor_orders,
+    return DFM_StateSpace_Results(results=dfm_res, start_params=init_params, var_order=factor_orders,
                             mu=mu, sigma=sigma)
