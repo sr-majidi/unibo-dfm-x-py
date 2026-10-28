@@ -32,8 +32,8 @@ See [Requirements](#requirements) for the list of required packages. The scripts
 | 1 | Prepare the data | [`Fred_transform`](#fred_transform) on the raw FRED csv, followed by the cleaning of the missing and non-stationary series (see `main.py`) | a stationary dataframe indexed by time |
 | 2 | Estimate the number of common factors | [`ABC_crit`](#abc_crit) | `rhat1` and `rhat2`, the number of factors at the 5% and 1% thresholds |
 | 3 | Static factor analysis | [`SFM_StateSpace`](#class-sfm_statespace) / [`StaticFM`](#staticfm) | factors, loadings, projection, residuals, eigenvalues and eigenvectors |
-| 4 | VAR lag selection | [`select_var_order`](#select_var_order) | the order of the VAR process of the factors, chosen by AIC and confirmed via the likelihood ratio test |
-| 5 | State space estimation | [`DFM_StateSpace`](#dfm_statespace), which calls [`DFM_init_params`](#dfm_init_params) and `DynamicFactorMQ` | a [`DFM_StateSpace_Results`](#class-dfm_statespace_results) instance holding the fitted model |
+| 4 | VAR lag selection | AIC via `sm.tsa.VAR(...).select_order(...)`, confirmed via a likelihood ratio test (see `main.py`) | the order of the VAR process of the factors, chosen by AIC and confirmed via the likelihood ratio test |
+| 5 | State space estimation | [`DynamicFM`](#dynamicfm), which calls [`DFM_init_params`](#dfm_init_params) and `DynamicFactorMQ` | a [`DynamicFMResults`](#class-dynamicfmresults) instance holding the fitted model |
 | 6 | Rolling-window forecasting | `results.forecast(...)` on every window, rescaled via `mu` and `sigma` | 1-step and 4-step ahead forecasts for every forecast origin, the mean squared forecast errors of the select variables in a pandas dataframe, and plots of the forecasts against the real observations |
 | 7 | Spectral analysis and unit root diagnostics (optional) | [`DFM_periodogram`](#dfm_periodogram) on the estimated factors, [`adf_wrapper`](#unit-root-diagnostics), [`kpss_wrapper`](#unit-root-diagnostics), [`CT_unitroot`](#unit-root-diagnostics) | periodograms of the factors, ADF/KPSS test results and the wild bootstrap ADF p-value |
 
@@ -42,9 +42,11 @@ See [Requirements](#requirements) for the list of required packages. The scripts
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from scipy.stats import chi2
 from src.modules.Fred_transform import Fred_transform
 from src.modules.ABC_crit import ABC_crit
-from src.models.dynamic_methods import DFM_StateSpace, select_var_order
+from src.models.dynamic_methods import DynamicFM
 from src.models.static_methods import SFM_StateSpace
 
 ## Load the raw FRED-QD data and apply the stationarity transformations
@@ -76,16 +78,32 @@ sfm = SFM_StateSpace(fred_df, nfactors=kfactors, standardize=True, method='svd',
 sfm.plot_scree()
 plt.show()
 
-## Select the order of the VAR process followed by the common factors
-state_lag = select_var_order(sfm.factors, maxlags=4, alpha=0.05)
+## Specify a VAR process for the estimated factors and use AIC to select the lag order of the process
+F_hat = sfm.factors
+state_var = sm.tsa.VAR(F_hat, freq=F_hat.index.freq)
+state_lag_res = state_var.select_order(maxlags=4, trend='n') ## The upper bound is set to one year of quarterly lags
+lag_aic = state_lag_res.aic
+
+## Compare the AIC selected process with the next most parsimonious process (the AIC selected lag order minus one) via the likelihood ratio test
+if lag_aic <= 1:
+    state_lag = lag_aic
+else:
+    fit1 = sm.tsa.VAR(F_hat, freq=F_hat.index.freq).fit(maxlags=lag_aic, ic=None, trend='n')
+    fit2 = sm.tsa.VAR(F_hat.iloc[1:,:], freq=F_hat.index.freq).fit(maxlags=lag_aic-1, ic=None, trend='n')
+    lr_stat = -2 * (fit2.llf - fit1.llf)
+    chi_df = F_hat.shape[1] ** 2
+
+    lr_pval = chi2.sf(lr_stat, chi_df)
+
+    state_lag = lag_aic if lr_pval < 0.05 else lag_aic - 1
 
 ## Estimate the dynamic factor model, initialized with the static estimates
-dfm = DFM_StateSpace(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
+dfm = DynamicFM(fred_df, nfactors=kfactors, factor_orders=state_lag, idiosyncratic_ar1=False)
 dfm_res = dfm.results
 print(dfm_res.summary())
 ```
 > [!NOTE]
-> 1. The data is standardized by `DFM_StateSpace` before the model is estimated, therefore the forecasts are on the standardized scale and have to be brought back to the original scale via the moments stored in the output.
+> 1. The data is standardized by `DynamicFM` before the model is estimated, therefore the forecasts are on the standardized scale and have to be brought back to the original scale via the moments stored in the output.
 >
 > 2. The upper bound for the order of the VAR process is set to 4, which is one year of quarterly lags. With a larger bound the AIC tends to select the largest order available, and the EM algorithm can fail on some of the estimation windows.
 
@@ -119,7 +137,7 @@ fc_index = {h: [] for h in horizons}
 for origin in range(W, fred_df_full.shape[0] - H + 1):
     window = fred_df_full.iloc[origin-W:origin,:]
     window.index.freq = window.index.inferred_freq
-    dfm_w = DFM_StateSpace(window, nfactors=kfactors, factor_orders=state_lag, maxiter=50)
+    dfm_w = DynamicFM(window, nfactors=kfactors, factor_orders=state_lag, maxiter=50)
     fc = dfm_w.results.forecast(steps=H) * dfm_w.sigma + dfm_w.mu
     for h in horizons:
         fc_dfm[h].append(fc.iloc[h-1,:].to_numpy())
@@ -188,22 +206,6 @@ from src.models.static_methods import StaticFM
 factors, loadings, projection, residuals, eigenvals, eigenvecs = StaticFM(fred_df, nfactors=kfactors)
 ```
 
-### `select_var_order`
-```python
-select_var_order(factors: pd.DataFrame,
-                 maxlags: int | None = 8,
-                 alpha: float | None = 0.05) -> int
-```
-This function selects the order of the VAR process followed by the common factors. The order is first chosen via AIC. It is then compared against the next most parsimonious process, i.e. the AIC selected order minus one, via the likelihood ratio test. The larger process is kept only if the null hypothesis of the smaller one is rejected at level `alpha`.
-
-Parameters:
-- `factors`: Dataframe of the estimated common factors, one column per factor.
-- `maxlags`: Upper bound for the order of the process. The default is 8.
-- `alpha`: Significance level of the likelihood ratio test. The default is 0.05.
-
-Returns:
-- `int` containing the selected VAR order. It is always at least 1, as required by `DynamicFactorMQ`.
-
 ### `DFM_init_params`
 ```python
 DFM_init_params(loadings: pd.DataFrame,
@@ -227,39 +229,37 @@ Parameters:
 > [!NOTE]
 > `statsmodels` orders the loadings variable by variable, therefore the matrix of loadings has to be flattened as `loadings.ravel()` and not as `loadings.T.ravel()`.
 
-### `DFM_StateSpace`
+### `DynamicFM`
 ```python
-DFM_StateSpace(data: pd.DataFrame,
-               nfactors: int,
-               factor_orders: int | None = None,
-               idiosyncratic_ar1: bool | None = False,
-               maxlags: int | None = 8,
-               missing: str | None = 'fill-em',
-               maxiter: int | None = 500,
-               tolerance: float | None = 1e-6,
-               **kwargs) -> DFM_StateSpace_Results
+DynamicFM(data: pd.DataFrame,
+          nfactors: int,
+          factor_orders: int,
+          idiosyncratic_ar1: bool | None = False,
+          missing: str | None = 'fill-em',
+          maxiter: int | None = 500,
+          tolerance: float | None = 1e-6,
+          **kwargs) -> DynamicFMResults
 ```
-Wrapper function around the `DynamicFactorMQ` class of `statsmodels`. It standardizes the data, estimates the factors and the loadings via PCA, selects and estimates the VAR process of the factors, estimates the variances of the idiosyncratic components, and finally fits the model via the EM algorithm starting from the static estimates.
+Wrapper function around the `DynamicFactorMQ` class of `statsmodels`. It standardizes the data, estimates the factors and the loadings via PCA, estimates the VAR process of the factors, estimates the variances of the idiosyncratic components, and finally fits the model via the EM algorithm starting from the static estimates.
 
 Parameters:
 - `data`: Stationary dataframe indexed by time with a recognizable frequency. Missing values are allowed, they are only imputed for the initialization and are handled natively by the Kalman filter.
 - `nfactors`: Number of common factors, e.g. as estimated via `ABC_crit`.
-- `factor_orders`: Order of the VAR process of the factors. If not provided, it is selected via `select_var_order`.
+- `factor_orders`: Order of the VAR process of the factors, e.g. as selected via AIC and the likelihood ratio test as in the example above.
 - `idiosyncratic_ar1`: Whether the idiosyncratic components follow an AR(1) process. The default is False.
-- `maxlags`: Upper bound for the order selection. The default is 8.
 - `missing`: Imputation method for the initialization, `'mean'` or `'fill-em'`. The default is `'fill-em'`.
 - `maxiter`: Maximum number of EM iterations. The default is 500.
 - `tolerance`: Convergence threshold of the EM algorithm. The default is 1e-6.
 - `**kwargs`: Passed on to the constructor of `DynamicFactorMQ`.
 
 Returns:
-- `DFM_StateSpace_Results` containing the fitted results, the starting parameters, the VAR order and the moments used to standardize the data.
+- `DynamicFMResults` containing the fitted results, the starting parameters, the VAR order and the moments used to standardize the data.
 
 > [!NOTE]
 > The rows of the data with fewer than `nfactors` observations, e.g. the COVID quarters set to NaN, are left out of the static initialization only. The Kalman filter of `DynamicFactorMQ` uses all the rows.
 
-### `class DFM_StateSpace_Results`
-Results container for the output of `DFM_StateSpace`.
+### `class DynamicFMResults`
+Results container for the output of `DynamicFM`.
 #### Properties
 - `results`: Fitted `DynamicFactorMQResults` instance from `statsmodels`. It is fitted on the standardized data.
 - `start_params`: Initial parameters fed to the EM algorithm.
